@@ -1,0 +1,50 @@
+# Stage 0 alignment policy + Stage 1 dataset spec for the sorting-task ACT run.
+#
+# Source data: episodes were already converted to episode.hdf5 by
+# teleop-intent/scripts/episode_to_hdf5.py (nearest-neighbor alignment of all
+# streams onto a fixed 30Hz grid built over the overlapping window). Checked
+# via teleop-intent/data/manifest.csv: rate_hz=30.0 and schema_version=2 are
+# uniform across all 122 logged episodes, so we reuse those files as-is
+# instead of re-converting. scripts/build_dataset.py is our own independent
+# copy of the converter, kept for when we need a different camera set /
+# rate (e.g. gearbox data) — it writes episode_policy.hdf5 so it never
+# collides with the intent project's episode.hdf5 in the same folder.
+
+data:
+  store_root: C:/Users/ceti/Documents/05_data/teleop-sorting/avatar
+  episode_file: episode.hdf5          # existing, aligned — see note above
+  manifest: data/manifest.csv         # copied from teleop-intent, same episodes
+  splits: data/splits                 # copied from teleop-intent: 83/18/17, seed 0
+  include_success: [success, partial]
+
+alignment:
+  rate_hz: 30.0                       # inherited, matches image capture rate
+  method: nearest_neighbor            # per intent converter, tolerance implicit in grid dt
+
+cameras:
+  # dropping head_cam_right: stereo pair of head_cam_left, near-duplicate
+  # pixels for 2x vision compute, ACT doesn't use stereo geometry.
+  use: [wrist_cam_left, wrist_cam_right, head_cam_left]
+  resize_to: [240, 320]               # [H, W], per camera, native head res
+
+state:
+  train_states: [4]                   # ENGAGED only (see intent dataset.yaml enum)
+
+proprio:
+  # per arm: EE position (3) + 6D rotation (6) + gripper width (1) = 10 -> 20 total
+  source: observations/arm_{side}/O_T_EE   # measured
+  gripper: observations/arm_{side}/gripper_width
+  dims_per_arm: 10
+  arms: [arm_left, arm_right]
+
+action:
+  # per arm: commanded EE position (3) + 6D rotation (6) + gripper cmd (1) = 10 -> 20 total
+  source: actions/arm_{side}/O_T_EE_cmd    # commanded, column-major 4x4 flat[16]
+  gripper: actions/arm_{side}/gripper_cmd
+  dims_per_arm: 10
+  arms: [arm_left, arm_right]
+  chunk_size: 60                      # K, ~2s at 30Hz
+
+normalize:
+  method: zero_mean_unit_var          # per-dim, train-split stats only
+  stats_file: dataset/stats.npz

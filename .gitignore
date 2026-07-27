@@ -2,9 +2,13 @@
 __pycache__/
 *.py[codz]
 *$py.class
+checkpoints/
+results/
+data/
 
 # C extensions
 *.so
+*.npz
 
 # Distribution / packaging
 .Python
