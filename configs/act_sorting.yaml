@@ -23,7 +23,7 @@ train:
   log_every: 50
   ckpt_every: 50          # ~500 steps between checkpoints, same cadence as before
   ckpt_keep_last: 3       # older epoch_*.pt snapshots beyond this are deleted; latest.pt/best.pt always kept
-  ckpt_dir: checkpoints/act_sorting_full
+  ckpt_dir: checkpoints/act_sorting_world  # fresh dir -- world-frame proprio/action, not comparable to act_sorting_full's base-frame run
   seed: 0
   # Stage 2 overfit smoke test: set to 10 to train on the first 10 train-split
   # episodes only. Set to null for Stage 4 full training on the whole split.

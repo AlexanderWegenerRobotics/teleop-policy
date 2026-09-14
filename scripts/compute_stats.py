@@ -28,11 +28,12 @@ def collect(cfg):
         with h5py.File(path, "r") as f:
             p_parts, a_parts = [], []
             for arm in arms:
-                pos, rot6d = flat16_to_pos_rot6d(f[f"observations/{arm}/O_T_EE"][:])
+                # world frame -- see configs/dataset.yaml's proprio.source comment
+                pos, rot6d = flat16_to_pos_rot6d(f[f"observations/{arm}/O_T_EE_world"][:])
                 grip = f[f"observations/{arm}/gripper_width"][:][:, None]
                 p_parts.append(np.concatenate([pos, rot6d, grip], axis=-1))
 
-                cpos, crot6d = flat16_to_pos_rot6d(f[f"actions/{arm}/O_T_EE_cmd"][:])
+                cpos, crot6d = flat16_to_pos_rot6d(f[f"actions/{arm}/O_T_EE_cmd_world"][:])
                 cgrip = f[f"actions/{arm}/gripper_cmd"][:][:, None]
                 a_parts.append(np.concatenate([cpos, crot6d, cgrip], axis=-1))
             proprio_all.append(np.concatenate(p_parts, axis=-1))

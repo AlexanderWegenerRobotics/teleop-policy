@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "teleop-policy"
+version = "0.1.0"
+description = "ACT imitation-learning policy. Namespaced as teleop_policy so it can be imported alongside teleop-intent (which also has a top-level `models` package) by teleop-orchestrator."
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "torchvision",
+    "numpy",
+]
+
+[tool.setuptools]
+# models/act has no repo-root-relative absolute imports (act.py/backbone.py
+# only import torch/torchvision and each other via relative import), so
+# unlike teleop-intent this needs no dual bare-name registration -- the
+# teleop_policy-prefixed package is the only one this repo needs installed.
+packages = [
+    "teleop_policy",
+    "teleop_policy.models",
+    "teleop_policy.models.act",
+    "teleop_policy.dataset",
+]
+
+[tool.setuptools.package-dir]
+teleop_policy = "."

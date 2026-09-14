@@ -1,4 +1,4 @@
-# Vanilla ACT: CVAE-conditioned transformer that predicts a K-step action chunk.
+# ACT: CVAE-conditioned transformer that predicts a K-step action chunk.
 # At training time z is sampled from the CVAE encoder over the ground-truth
 # chunk; at inference z is zero. ~80M params at the default sizes.
 

@@ -13,8 +13,8 @@ from models.act.act import ACT
 
 M_ENSEMBLE = 0.01  # ALOHA default: w_i ~ exp(-m*i), i = steps since prediction was made
 
-# same layout as dataset/teleop_dataset.py: per arm, pos(3) + rot6d(6) + grip(1)
-POSE_KEYS = {"observations": ("O_T_EE", "gripper_width"), "actions": ("O_T_EE_cmd", "gripper_cmd")}
+# same layout as dataset/teleop_dataset.py: per arm, pos(3) + rot6d(6) + grip(1), world frame
+POSE_KEYS = {"observations": ("O_T_EE_world", "gripper_width"), "actions": ("O_T_EE_cmd_world", "gripper_cmd")}
 
 
 def load_model(ckpt_path, device):

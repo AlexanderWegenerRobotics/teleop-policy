@@ -1,0 +1,58 @@
+# Experiment B -- same budget as Experiment A, plus grasp-window oversampling.
+#
+# Run this ONLY after act_sorting_e600.yaml, and compare against it rather than
+# against the deployed 2000-epoch checkpoint: the two differ by exactly one
+# knob, so any difference in the sim rollout is attributable to the sampling.
+# Comparing against the deployed model instead would confound sampling with the
+# 1400 extra epochs of overfitting.
+#
+# Rationale: measured over 12 episodes and 50,938 engaged arm-frames, the arm is
+# horizontally centred over an object (<20mm) in 3.02% of frames and at grasp
+# depth (-101 +-20mm) in 15.90%, but BOTH at once in only 1.65%. The deployed
+# policy reproduces each component alone -- it centres to 0.1-7.9mm and it does
+# reach -101mm -- but never simultaneously: in four sim rollouts it was at
+# -141.6/-142.0/-143.5/-144.4mm at its moment of best centring, ~40mm high and
+# reproducible to +-1.5mm. The conjunction is the rarest thing in the data and
+# a uniform sampler spends ~98% of its budget elsewhere.
+#
+# The window is derived from actions/<arm>/gripper_cmd transitions -- raw
+# recorded data, no annotation -- see dataset/teleop_dataset.py _grasp_window.
+#
+# grasp_oversample 5.0 puts ~34% of samples in the 1.5s pre-grasp window
+# (natural rate 9.3% on ep 014). Expect overall val L1 to get slightly WORSE:
+# accuracy is being traded from transit, which already works, toward the
+# terminal approach, which does not. Judge this on the sim rollout, not val L1.
+#
+#   python scripts/train.py configs/act_sorting_grasp.yaml
+#   ~12 min at 1.2 s/epoch
+
+dataset_config: configs/dataset.yaml
+
+# Applied on top of dataset.yaml (see train.py) so the shared config stays the
+# single source of truth for everything this experiment is NOT varying.
+dataset_overrides:
+  sampling:
+    grasp_oversample: 5.0
+    grasp_window_s: 1.5
+
+model:
+  hidden_dim: 512
+  latent_dim: 32
+  nheads: 8
+  enc_layers: 4
+  dec_layers: 7
+  dim_feedforward: 3200
+  dropout: 0.1
+
+train:
+  lr: 1.0e-5
+  batch_size: 8
+  epochs: 600
+  kl_weight: 10.0
+  num_workers: 4
+  log_every: 50
+  ckpt_every: 100
+  ckpt_keep_last: 6
+  ckpt_dir: checkpoints/act_sorting_grasp
+  seed: 0
+  n_train_episodes: null

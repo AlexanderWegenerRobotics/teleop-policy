@@ -1,0 +1,46 @@
+# Experiment A -- baseline recipe, stopped where validation actually bottoms out.
+#
+# The 2000-epoch run overfits: val L1 reaches ~0.167 by epoch 400 and never
+# meaningfully improves, while train L1 keeps falling to 0.096. The gap grows
+# from +0.003 at epoch 400 to +0.049 at 1800. best.pt landed at epoch 1950 --
+# a noisy pick from a long plateau, deep in the overfitting regime, and that is
+# what is currently deployed.
+#
+# This run changes NOTHING except the epoch budget, so comparing its checkpoint
+# against the deployed one in the sim replay isolates a single question: did
+# the last ~1500 epochs help or hurt the actual task? val L1 cannot answer that
+# -- it averages 20 action dims over all timesteps and barely sees the 1.65% of
+# frames that are the grasp pose.
+#
+#   python scripts/train.py configs/act_sorting_e600.yaml
+#   ~12 min at 1.2 s/epoch
+#
+# Then, with the episode config server in --replay mode:
+#   python scripts/check_closed_loop.py --episodes 14 16 22 --blend 0 1.0 \
+#       --checkpoint checkpoints/act_sorting_e600/best.pt
+# and a sim rollout scored with
+#   teleop-orchestrator/scripts/compare_rollout_to_demo.py
+
+dataset_config: configs/dataset.yaml
+
+model:
+  hidden_dim: 512
+  latent_dim: 32
+  nheads: 8
+  enc_layers: 4
+  dec_layers: 7
+  dim_feedforward: 3200
+  dropout: 0.1
+
+train:
+  lr: 1.0e-5
+  batch_size: 8
+  epochs: 600
+  kl_weight: 10.0
+  num_workers: 4
+  log_every: 50
+  ckpt_every: 100         # 6 snapshots over the run
+  ckpt_keep_last: 6       # 6 x 425MB ~= 2.5GB; disk was at 95% -- watch it
+  ckpt_dir: checkpoints/act_sorting_e600
+  seed: 0
+  n_train_episodes: null
