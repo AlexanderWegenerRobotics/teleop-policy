@@ -297,8 +297,11 @@ def convert(folder, out_path, rate, scale, cameras, camera_params_path=None):
         for arm, (hdr, data, ts) in arms.items():
             sel = nearest_idx(ts, grid)
             g = obs.create_group(arm)
+            # World-frame pose/command columns (see dataset.yaml's proprio.source
+            # and action.source); kept in step with teleop-simulator's converter.
             for field, n in (("q_", 7), ("dq_", 7), ("tau_J_", 7),
-                             ("tau_ext_", 7), ("O_T_EE_", 16), ("F_ext_", 6)):
+                             ("tau_ext_", 7), ("O_T_EE_", 16), ("O_T_EE_world_", 16),
+                             ("F_ext_", 6)):
                 grp = col_group(hdr, data, field, n)
                 if grp is not None:
                     g.create_dataset(field.rstrip("_"), data=grp[sel])
@@ -310,7 +313,7 @@ def convert(folder, out_path, rate, scale, cameras, camera_params_path=None):
                 g.create_dataset("state", data=st[sel].astype(np.int64))
 
             ag = act.create_group(arm)
-            for field, n in (("q_cmd_", 7), ("O_T_EE_cmd_", 16)):
+            for field, n in (("q_cmd_", 7), ("O_T_EE_cmd_", 16), ("O_T_EE_cmd_world_", 16)):
                 grp = col_group(hdr, data, field, n)
                 if grp is not None:
                     ag.create_dataset(field.rstrip("_"), data=grp[sel])
