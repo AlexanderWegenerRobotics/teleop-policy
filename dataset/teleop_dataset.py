@@ -1,6 +1,3 @@
-# Torch Dataset over converted episode.hdf5 files: one random (episode, t)
-# sample per __getitem__, ACT-style (chunk of K future commanded actions).
-
 import os
 
 import h5py
@@ -9,27 +6,40 @@ import torch
 import yaml
 from torch.utils.data import Dataset
 
-try:
-    from transforms import flat16_to_pos_rot6d, normalize          # run from dataset/ or with it on sys.path
-except ImportError:
-    from dataset.transforms import flat16_to_pos_rot6d, normalize  # run as `dataset.teleop_dataset` from repo root
+from .transforms import flat16_to_pos_rot6d, normalize
 
 
 def load_cfg(path):
+    """Load a YAML config."""
     with open(path) as f:
         return yaml.safe_load(f)
 
 
 def read_split(path):
+    """Read episode ids from a split file."""
     with open(path) as f:
         return [ln.strip() for ln in f if ln.strip()]
 
 
-CLOSED_WIDTH_M = 0.04  # gripper_cmd is binary 0.0 / 0.08; midpoint splits it
+def engaged_mask(f, arms, train_states=(4,)):
+    """Frames where both arms are engaged with a valid command from the control loop."""
+    mask = None
+    for arm in arms:
+        g = f[f"observations/{arm}"]
+        m = np.isin(g["state"][:], list(train_states))
+        if "cmd_valid" in g:
+            m &= g["cmd_valid"][:] == 1
+        if "log_src" in g:
+            m &= g["log_src"][:] == 0
+        mask = m if mask is None else mask & m
+    return mask
 
 
 class EpisodicDataset(Dataset):
+    """One random engaged timestep per episode with its K-step action chunk."""
+
     def __init__(self, episode_ids, cfg, stats=None):
+        """Store episode ids, config fields and normalization stats."""
         self.episode_ids = episode_ids
         self.store_root = cfg["data"]["store_root"]
         self.episode_file = cfg["data"]["episode_file"]
@@ -38,73 +48,27 @@ class EpisodicDataset(Dataset):
         self.arms = cfg["action"]["arms"]
         self.K = cfg["action"]["chunk_size"]
         self.train_states = set(cfg["state"]["train_states"])
-        self.stats = stats  # dict with 'proprio_mean/std', 'action_mean/std', or None
-        # Grasp-window oversampling (see _pick_t / _grasp_window). 1.0 = the
-        # original uniform sampler, so this is opt-in and the default retrains
-        # bit-for-bit as before.
-        sampling = cfg.get("sampling") or {}
-        self.grasp_oversample = float(sampling.get("grasp_oversample", 1.0))
-        self.grasp_window_s = float(sampling.get("grasp_window_s", 1.5))
-        self.rate_hz = float((cfg.get("alignment") or {}).get("rate_hz", 30.0))
+        self.stats = stats
 
     def __len__(self):
+        """Number of episodes."""
         return len(self.episode_ids)
 
     def _episode_path(self, episode_id):
+        """Path to an episode's hdf5 file."""
         folder = str(episode_id).zfill(3)
         return os.path.join(self.store_root, folder, self.episode_file)
 
-    # picks a random ENGAGED timestep, both arms; falls back to any timestep
     def _pick_t(self, f):
-        states = [f[f"observations/{arm}/state"][:] for arm in self.arms]
-        engaged = np.ones_like(states[0], dtype=bool)
-        for s in states:
-            engaged &= np.isin(s, list(self.train_states))
+        """Random engaged timestep, else any timestep."""
+        engaged = engaged_mask(f, self.arms, self.train_states)
         valid = np.where(engaged)[0]
         if len(valid) == 0:
-            valid = np.arange(len(states[0]))
-        if self.grasp_oversample <= 1.0:
-            return int(np.random.choice(valid))
-        w = self._grasp_weights(f, valid)
-        return int(np.random.choice(valid, p=w))
-
-    def _grasp_window(self, f):
-        """Boolean mask over the episode: frames in the approach-to-grasp window.
-
-        Derived entirely from actions/<arm>/gripper_cmd, which is RAW RECORDED
-        DATA -- gripper_cmd is logged as exactly 0.0 (closed) or 0.08 (open)
-        by data_logger.hpp, so a 0.08 -> 0.0 transition IS the grasp instant.
-        No annotation, no labels/ dataset, nothing to hand-label. (episode.hdf5
-        does carry labels/arm_*_phase, but this deliberately does not use it:
-        depending on it would make the training set only as good as its
-        labelling, and the signal is already unambiguous in the actions.)
-
-        The window is the grasp_window_s BEFORE each close, not the close
-        itself -- that is the final approach the policy currently gets wrong,
-        and it is where the conjunction of "centred over the object" and "at
-        grasp depth" actually lives. Measured over 12 episodes, the arm is in
-        that joint configuration for only 1.65% of engaged frames while a
-        uniform sampler spends 98% of its budget elsewhere.
-        """
-        n = f[f"actions/{self.arms[0]}/gripper_cmd"].shape[0]
-        win = np.zeros(n, dtype=bool)
-        span = int(round(self.grasp_window_s * self.rate_hz))
-        for arm in self.arms:
-            g = f[f"actions/{arm}/gripper_cmd"][:]
-            closes = np.where(np.diff((g < CLOSED_WIDTH_M).astype(np.int8)) > 0)[0]
-            for c in closes:
-                win[max(0, c - span):min(n, c + 1)] = True
-        return win
-
-    def _grasp_weights(self, f, valid):
-        """Sampling distribution over `valid` that favours the grasp window by
-        grasp_oversample:1, normalised so it stays a probability vector however
-        many grasp frames the episode happens to contain."""
-        win = self._grasp_window(f)[valid]
-        w = np.where(win, float(self.grasp_oversample), 1.0)
-        return w / w.sum()
+            valid = np.arange(len(engaged))
+        return int(np.random.choice(valid))
 
     def _load_image(self, f, cam, t):
+        """Camera frame at t, resized and scaled to [0, 1]."""
         img = f[f"observations/images/{cam}"][t]
         if img.shape[:2] != self.img_hw:
             import cv2
@@ -112,8 +76,7 @@ class EpisodicDataset(Dataset):
         return img.astype(np.float32) / 255.0
 
     def _proprio(self, f, t):
-        # world frame (T_base * O_T_EE), not base frame -- see configs/dataset.yaml's
-        # proprio.source comment for why.
+        """World-frame EE pose and gripper width for both arms at t."""
         parts = []
         for arm in self.arms:
             pos, rot6d = flat16_to_pos_rot6d(f[f"observations/{arm}/O_T_EE_world"][t])
@@ -121,9 +84,8 @@ class EpisodicDataset(Dataset):
             parts.append(np.concatenate([pos, rot6d, [grip]]))
         return np.concatenate(parts).astype(np.float32)
 
-    # commanded action chunk [K, 20] starting at t, padded with the last
-    # valid action past episode end; is_pad marks the padded steps
     def _action_chunk(self, f, t):
+        """Commanded action chunk [K, 20] from t, edge-padded, with pad mask."""
         T = f["actions/arm_left/O_T_EE_cmd_world"].shape[0]
         end = min(t + self.K, T)
         chunk = []
@@ -131,7 +93,7 @@ class EpisodicDataset(Dataset):
             pos, rot6d = flat16_to_pos_rot6d(f[f"actions/{arm}/O_T_EE_cmd_world"][t:end])
             grip = f[f"actions/{arm}/gripper_cmd"][t:end][:, None]
             chunk.append(np.concatenate([pos, rot6d, grip], axis=-1))
-        chunk = np.concatenate(chunk, axis=-1).astype(np.float32)  # [end-t, 20]
+        chunk = np.concatenate(chunk, axis=-1).astype(np.float32)
 
         is_pad = np.zeros(self.K, dtype=bool)
         if end - t < self.K:
@@ -141,10 +103,11 @@ class EpisodicDataset(Dataset):
         return chunk, is_pad
 
     def __getitem__(self, idx):
+        """Sample images, proprio and action chunk from one episode."""
         episode_id = self.episode_ids[idx]
         with h5py.File(self._episode_path(episode_id), "r") as f:
             t = self._pick_t(f)
-            images = np.stack([self._load_image(f, cam, t) for cam in self.cams])  # [C,H,W,3]
+            images = np.stack([self._load_image(f, cam, t) for cam in self.cams])
             proprio = self._proprio(f, t)
             action, is_pad = self._action_chunk(f, t)
 
@@ -152,7 +115,7 @@ class EpisodicDataset(Dataset):
             proprio = normalize(proprio, self.stats["proprio_mean"], self.stats["proprio_std"])
             action = normalize(action, self.stats["action_mean"], self.stats["action_std"])
 
-        images = torch.from_numpy(images).permute(0, 3, 1, 2).float()  # [C,3,H,W]
+        images = torch.from_numpy(images).permute(0, 3, 1, 2).float()
         return {
             "images": images,
             "proprio": torch.from_numpy(proprio).float(),
@@ -164,7 +127,7 @@ class EpisodicDataset(Dataset):
 
 
 def build_datasets(cfg_path):
-    """Convenience: returns (train_ds, val_ds, test_ds) using saved normalization stats."""
+    """Build train, val and test datasets with saved normalization stats."""
     cfg = load_cfg(cfg_path)
     stats_path = cfg["normalize"]["stats_file"]
     stats = None

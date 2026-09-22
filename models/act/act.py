@@ -1,7 +1,3 @@
-# ACT: CVAE-conditioned transformer that predicts a K-step action chunk.
-# At training time z is sampled from the CVAE encoder over the ground-truth
-# chunk; at inference z is zero. ~80M params at the default sizes.
-
 import torch
 import torch.nn as nn
 
@@ -9,9 +5,12 @@ from .backbone import ResNet18Backbone, sine_pos_embed_1d, sine_pos_embed_2d
 
 
 class ACT(nn.Module):
+    """CVAE-conditioned transformer that predicts a K-step action chunk."""
+
     def __init__(self, n_cameras, proprio_dim=20, action_dim=20, chunk_size=60,
                  hidden_dim=512, latent_dim=32, nheads=8, enc_layers=4, dec_layers=7,
                  dim_feedforward=3200, dropout=0.1):
+        """Build backbones, CVAE encoder, transformer and action head."""
         super().__init__()
         self.chunk_size = chunk_size
         self.hidden_dim = hidden_dim
@@ -22,9 +21,8 @@ class ACT(nn.Module):
 
         self.proprio_proj = nn.Linear(proprio_dim, hidden_dim)
         self.latent_proj = nn.Linear(latent_dim, hidden_dim)
-        self.extra_pos_embed = nn.Embedding(2, hidden_dim)  # for [proprio, latent] tokens
+        self.extra_pos_embed = nn.Embedding(2, hidden_dim)
 
-        # CVAE encoder: [cls, proprio, K x action] -> mu, logvar
         self.cls_embed = nn.Embedding(1, hidden_dim)
         self.cvae_proprio_proj = nn.Linear(proprio_dim, hidden_dim)
         self.cvae_action_proj = nn.Linear(action_dim, hidden_dim)
@@ -40,20 +38,20 @@ class ACT(nn.Module):
         self.query_embed = nn.Embedding(chunk_size, hidden_dim)
         self.action_head = nn.Linear(hidden_dim, action_dim)
 
-    # images [B,n_cam,3,H,W] -> flattened tokens + matching position embeddings
     def _encode_images(self, images):
+        """Images [B, n_cam, 3, H, W] to flattened tokens and position embeddings."""
         B, n_cam = images.shape[:2]
         tokens, poses = [], []
         for i in range(n_cam):
-            feat = self.input_proj(self.backbones[i](images[:, i]))  # [B,hidden,h,w]
+            feat = self.input_proj(self.backbones[i](images[:, i]))
             h, w = feat.shape[-2:]
             pos = sine_pos_embed_2d(h, w, self.hidden_dim, feat.device)
             tokens.append(feat.flatten(2).transpose(1, 2))
             poses.append(pos.flatten(1).transpose(0, 1).unsqueeze(0).expand(B, -1, -1))
         return torch.cat(tokens, dim=1), torch.cat(poses, dim=1)
 
-    # training: encode ground-truth chunk -> sampled z, mu, logvar. inference: z=0.
     def _encode_latent(self, proprio, actions, is_pad):
+        """Sample z from the CVAE encoder in training, z = 0 at inference."""
         B = proprio.shape[0]
         if actions is None:
             return proprio.new_zeros(B, self.latent_dim), None, None
@@ -74,6 +72,7 @@ class ACT(nn.Module):
         return z, mu, logvar
 
     def forward(self, images, proprio, actions=None, is_pad=None):
+        """Predict an action chunk [B, K, action_dim], plus mu and logvar."""
         B = images.shape[0]
         img_tok, img_pos = self._encode_images(images)
         z, mu, logvar = self._encode_latent(proprio, actions, is_pad)
@@ -87,16 +86,17 @@ class ACT(nn.Module):
 
         memory = self.encoder(tokens + pos)
         queries = self.query_embed.weight.unsqueeze(0).expand(B, -1, -1)
-        a_hat = self.action_head(self.decoder(queries, memory))  # [B,K,action_dim]
+        a_hat = self.action_head(self.decoder(queries, memory))
         return a_hat, mu, logvar
 
 
 def kl_divergence(mu, logvar):
+    """KL divergence to a standard normal, summed over latent dims, batch mean."""
     return -0.5 * torch.mean(torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=-1))
 
 
-# L1 on unpadded chunk steps + beta-weighted KL; call with mu=None at inference
 def act_loss(a_hat, actions, is_pad, mu, logvar, kl_weight=10.0):
+    """L1 on unpadded chunk steps plus weighted KL."""
     valid = (~is_pad).unsqueeze(-1)
     l1 = ((a_hat - actions).abs() * valid).sum() / valid.sum() / actions.shape[-1]
     kl = kl_divergence(mu, logvar) if mu is not None else a_hat.new_zeros(())

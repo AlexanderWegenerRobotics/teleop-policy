@@ -1,9 +1,3 @@
-# Episode folder (video .h264 + telemetry .csv) -> aligned episode.hdf5.
-# Copied from teleop-intent/scripts/episode_to_hdf5.py, kept independent so
-# changes here (camera set, rate) don't touch the intent project's data.
-# Streams run at different uneven rates -> aligned onto a fixed-rate grid
-# built over the overlapping window, nearest-neighbor per stream.
-
 import argparse
 import glob
 import json
@@ -13,7 +7,7 @@ import sys
 
 import numpy as np
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 try:
     import h5py
@@ -32,10 +26,8 @@ except ImportError:
 MARKER_ROWS = 2
 
 
-# ── Video ──────────────────────────────────────────────────────────────────
-
-# (width, full_height, fps) of an h264 elementary stream, via ffprobe
 def probe_dims(path):
+    """Width, full height and fps of an h264 stream via ffprobe."""
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=width,height,r_frame_rate",
@@ -47,8 +39,8 @@ def probe_dims(path):
     return int(w), int(h), fps
 
 
-# yields each decoded RGB frame (full height, including marker rows)
 def decode_frames(path, full_w, full_h):
+    """Yield decoded RGB frames at full height, marker rows included."""
     proc = subprocess.Popen(
         ["ffmpeg", "-v", "error", "-i", path, "-f", "rawvideo",
          "-pix_fmt", "rgb24", "-"],
@@ -63,8 +55,8 @@ def decode_frames(path, full_w, full_h):
     proc.wait()
 
 
-# decodes a 64-bit little-endian value from a marker row (1px/bit, white=1)
 def decode_marker_u64(row):
+    """Decode a 64-bit little-endian value from a marker row."""
     bits = (row[:64, 0].astype(np.uint64) > 128)
     val = np.uint64(0)
     for b in range(64):
@@ -73,12 +65,10 @@ def decode_marker_u64(row):
     return int(val)
 
 
-# returns (frames[N,h,w,3] uint8, wall_clock_ns[N], frame_ids[N])
-def load_video(path, scale):
+def load_video(path, out_w, out_h):
+    """Load resized frames, wall-clock timestamps and frame ids from an h264 video."""
     full_w, full_h, fps = probe_dims(path)
     img_h = full_h - MARKER_ROWS
-    out_w = max(1, int(round(full_w * scale)))
-    out_h = max(1, int(round(img_h * scale)))
 
     sidecar = os.path.splitext(path)[0] + ".timestamps.csv"
     side_ts = None
@@ -96,7 +86,7 @@ def load_video(path, scale):
             wall = decode_marker_u64(frame[img_h])
             fid  = decode_marker_u64(frame[img_h + 1])
         img = frame[:img_h]
-        if scale != 1.0:
+        if img.shape[:2] != (out_h, out_w):
             img = _resize(img, out_w, out_h)
         frames.append(img)
         ts.append(wall)
@@ -107,10 +97,36 @@ def load_video(path, scale):
     return np.asarray(frames), np.asarray(ts, np.int64), np.asarray(fids, np.int64)
 
 
-# ── Telemetry ────────────────────────────────────────────────────────────────
+def load_image_log(path, name, out_w, out_h):
+    """Load resized frames, wall-clock timestamps and frame ids from an images_<name>.hdf5 log."""
+    side = read_timestamps(os.path.splitext(path)[0] + ".timestamps.csv")
+    with h5py.File(path, "r") as f:
+        ds = f[f"observations/images/{name}"]
+        n = ds.shape[0]
+        native = ds.shape[1:3]
+        frames = np.empty((n, out_h, out_w, 3), np.uint8)
+        for i in range(0, n, 64):
+            for j, img in enumerate(ds[i:i + 64]):
+                frames[i + j] = img if img.shape[:2] == (out_h, out_w) else _resize(img, out_w, out_h)
+        if side is not None:
+            ts, fids = side[:n, 1], side[:n, 3]
+        else:
+            ts, fids = f["observations/timestamp_ns"][:n].astype(np.int64), np.arange(n)
+    if n == 0:
+        return None
+    return frames, ts.astype(np.int64), fids.astype(np.int64), (native[1], native[0])
 
-# returns (header list, data[N,cols] float, wall_clock_ns[N])
+
+def read_timestamps(path):
+    """Integer array from a camera timestamps csv, or None."""
+    if not os.path.exists(path):
+        return None
+    arr = np.genfromtxt(path, delimiter=",", skip_header=1, dtype=np.int64)
+    return arr.reshape(1, -1) if arr.ndim == 1 else arr
+
+
 def load_csv(path):
+    """Load a telemetry csv as header, data and wall-clock timestamps."""
     with open(path) as f:
         header = f.readline().strip().split(";")
     data = np.genfromtxt(path, delimiter=";", skip_header=1)
@@ -120,8 +136,8 @@ def load_csv(path):
     return header, data, wall
 
 
-# stacks columns named '<prefix>0..count-1' into [N,count]; None if absent
 def col_group(header, data, prefix, count):
+    """Stack columns prefix0..prefixN-1 into [N, count], or None."""
     names = [f"{prefix}{i}" for i in range(count)]
     if not all(n in header for n in names):
         return None
@@ -130,23 +146,20 @@ def col_group(header, data, prefix, count):
 
 
 def col_one(header, data, name):
+    """Single named column, or None."""
     return data[:, header.index(name)] if name in header else None
 
 
-# ── Alignment ────────────────────────────────────────────────────────────────
-
-# for each grid time, index of the nearest stream sample
 def nearest_idx(stream_ts, grid_ts):
+    """Index of the nearest stream sample for each grid time."""
     pos = np.searchsorted(stream_ts, grid_ts)
     pos = np.clip(pos, 1, len(stream_ts) - 1)
     left, right = stream_ts[pos - 1], stream_ts[pos]
     return np.where(np.abs(grid_ts - left) <= np.abs(right - grid_ts), pos - 1, pos)
 
 
-# ── Episode ────────────────────────────────────────────────────────────────
-
-# pulls seed/mode/color_bin_mapping/success from arm_left_meta.csv if present
 def read_meta(folder):
+    """Episode metadata from arm_left_meta.csv."""
     out = {}
     mpath = os.path.join(folder, "arm_left_meta.csv")
     if not os.path.exists(mpath):
@@ -168,6 +181,7 @@ def read_meta(folder):
 
 
 def load_camera_params(folder, params_path):
+    """Load camera_params.json from the given or default locations."""
     candidates = []
     if params_path:
         candidates.append(params_path)
@@ -182,8 +196,8 @@ def load_camera_params(folder, params_path):
     return {}
 
 
-# creates one eye dataset from pre-split stereo frames, copying/adjusting attrs
 def _write_eye_dataset(imgs_group, eye_name, eye_frames, stereo_attrs, cam_params, stereo_cam_name):
+    """Write one eye of the stereo head camera with its attrs."""
     H, eye_w = eye_frames.shape[1], eye_frames.shape[2]
     ds = imgs_group.create_dataset(
         eye_name, data=eye_frames,
@@ -201,17 +215,27 @@ def _write_eye_dataset(imgs_group, eye_name, eye_frames, stereo_attrs, cam_param
             ds.attrs["T_world_cam"] = np.asarray(cp["T_world_cam"], dtype=np.float64)
 
 
-def convert(folder, out_path, rate, scale, cameras, camera_params_path=None):
+def convert(folder, out_path, rate, size, cameras, camera_params_path=None):
+    """Align all streams of one episode folder onto a fixed-rate grid and write hdf5."""
+    out_h, out_w = size
     cams = {}
     cam_native_dims = {}
     for name in cameras:
         vpath = os.path.join(folder, f"video_{name}.h264")
+        hpath = os.path.join(folder, f"images_{name}.hdf5")
         if os.path.exists(vpath):
             full_w, full_h, _ = probe_dims(vpath)
             cam_native_dims[name] = (full_w, full_h - MARKER_ROWS)
-            v = load_video(vpath, scale)
+            v = load_video(vpath, out_w * 2 if name == "head_cam_stereo" else out_w, out_h)
             if v is not None:
                 cams[name] = v
+        elif os.path.exists(hpath):
+            v = load_image_log(hpath, name, out_w, out_h)
+            if v is not None:
+                cams[name] = v[:3]
+                cam_native_dims[name] = v[3]
+        else:
+            print(f"  [warn] {folder}: camera {name} not found")
 
     cam_params = load_camera_params(folder, camera_params_path)
 
@@ -250,7 +274,7 @@ def convert(folder, out_path, rate, scale, cameras, camera_params_path=None):
     with h5py.File(out_path, "w") as f:
         f.attrs["schema_version"] = SCHEMA_VERSION
         f.attrs["rate_hz"] = rate
-        f.attrs["image_scale"] = scale
+        f.attrs["image_size"] = np.asarray(size)
         f.attrs["episode_id"] = os.path.basename(folder.rstrip("/\\"))
         for k, v in meta.items():
             f.attrs[k] = v
@@ -297,8 +321,8 @@ def convert(folder, out_path, rate, scale, cameras, camera_params_path=None):
         for arm, (hdr, data, ts) in arms.items():
             sel = nearest_idx(ts, grid)
             g = obs.create_group(arm)
-            # World-frame pose/command columns (see dataset.yaml's proprio.source
-            # and action.source); kept in step with teleop-simulator's converter.
+
+
             for field, n in (("q_", 7), ("dq_", 7), ("tau_J_", 7),
                              ("tau_ext_", 7), ("O_T_EE_", 16), ("O_T_EE_world_", 16),
                              ("F_ext_", 6)):
@@ -308,9 +332,10 @@ def convert(folder, out_path, rate, scale, cameras, camera_params_path=None):
             gw = col_one(hdr, data, "gripper_width")
             if gw is not None:
                 g.create_dataset("gripper_width", data=gw[sel])
-            st = col_one(hdr, data, "state")
-            if st is not None:
-                g.create_dataset("state", data=st[sel].astype(np.int64))
+            for field in ("state", "cmd_valid", "log_src", "clutch"):
+                col = col_one(hdr, data, field)
+                if col is not None:
+                    g.create_dataset(field, data=col[sel].astype(np.int64))
 
             ag = act.create_group(arm)
             for field, n in (("q_cmd_", 7), ("O_T_EE_cmd_", 16), ("O_T_EE_cmd_world_", 16)):
@@ -338,22 +363,24 @@ def convert(folder, out_path, rate, scale, cameras, camera_params_path=None):
 
 
 def _convert_one(args_tuple):
-    folder, out_path, rate, scale, cameras, camera_params_path = args_tuple
+    """Convert one episode, logging errors instead of raising."""
+    folder, out_path, rate, size, cameras, camera_params_path = args_tuple
     try:
-        convert(folder, out_path, rate, scale, cameras,
+        convert(folder, out_path, rate, size, cameras,
                 camera_params_path=camera_params_path)
     except Exception as e:
         print(f"  [error] {folder}: {e}")
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    """Convert one episode folder or all of them."""
+    ap = argparse.ArgumentParser(description="Episode folder to aligned hdf5.")
     ap.add_argument("path", help="episode folder, or logs root with --all")
     ap.add_argument("--all", action="store_true", help="process every NNN/ folder under path")
-    ap.add_argument("--rate", type=float, default=30.0, help="output control rate (Hz)")
-    ap.add_argument("--scale", type=float, default=0.25, help="image downscale factor (1.0 = native)")
-    ap.add_argument("--cameras", nargs="+", default=["head_cam_stereo", "wrist_cam_left", "wrist_cam_right"])
+    ap.add_argument("--rate", type=float, default=20.0, help="output grid rate (Hz)")
+    ap.add_argument("--size", type=int, nargs=2, default=[240, 320], metavar=("H", "W"), help="image size per camera")
+    ap.add_argument("--cameras", nargs="+",
+                    default=["head_cam_stereo", "wrist_cam_left", "wrist_cam_right", "overview_cam"])
     ap.add_argument("--out", default="episode_policy.hdf5", help="output filename within each folder")
     ap.add_argument("--camera-params", default=None,
                     help="path to camera_params.json; also searched at <episode>/camera_params.json")
@@ -374,7 +401,7 @@ def main():
                 print(f"  [skip] {folder}: {args.out} already exists")
                 continue
             print(f"  [overwrite] {folder}: re-converting")
-        work.append((folder, out_path, args.rate, args.scale, args.cameras, args.camera_params))
+        work.append((folder, out_path, args.rate, tuple(args.size), args.cameras, args.camera_params))
 
     if not work:
         print("Nothing to convert.")

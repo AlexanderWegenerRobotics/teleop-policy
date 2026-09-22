@@ -1,80 +1,33 @@
-# Stage 0 alignment policy + Stage 1 dataset spec for the sorting-task ACT run.
-#
-# Source data: episodes were already converted to episode.hdf5 by
-# teleop-intent/scripts/episode_to_hdf5.py (nearest-neighbor alignment of all
-# streams onto a fixed 30Hz grid built over the overlapping window). Checked
-# via teleop-intent/data/manifest.csv: rate_hz=30.0 and schema_version=2 are
-# uniform across all 122 logged episodes, so we reuse those files as-is
-# instead of re-converting. scripts/build_dataset.py is our own independent
-# copy of the converter, kept for when we need a different camera set /
-# rate (e.g. gearbox data) — it writes episode_policy.hdf5 so it never
-# collides with the intent project's episode.hdf5 in the same folder.
-
 data:
-  store_root: C:/Users/ceti/Documents/05_data/teleop-sorting/avatar
-  episode_file: episode.hdf5          # existing, aligned — see note above
-  manifest: data/manifest.csv         # copied from teleop-intent, same episodes
-  splits: data/splits                 # copied from teleop-intent: 83/18/17, seed 0
+  store_root: C:/Users/ceti/Documents/05_data/teleop-sorting_v2/avatar
+  episode_file: episode_policy.hdf5
+  splits: data/splits
   include_success: [success, partial]
 
 alignment:
-  rate_hz: 30.0                       # inherited, matches image capture rate
-  method: nearest_neighbor            # per intent converter, tolerance implicit in grid dt
+  rate_hz: 20.0
+  method: nearest_neighbor
 
 cameras:
-  # dropping head_cam_right: stereo pair of head_cam_left, near-duplicate
-  # pixels for 2x vision compute, ACT doesn't use stereo geometry.
   use: [wrist_cam_left, wrist_cam_right, head_cam_left]
-  resize_to: [240, 320]               # [H, W], per camera, native head res
+  resize_to: [240, 320]
 
 state:
-  train_states: [4]                   # ENGAGED only (see intent dataset.yaml enum)
+  train_states: [4]
 
 proprio:
-  # per arm: EE position (3) + 6D rotation (6) + gripper width (1) = 10 -> 20 total
-  # World frame (T_base * O_T_EE), not the arm's base/mounting frame -- decouples
-  # the policy from base_pose calibration (see O_T_EE_world in data_logger.hpp /
-  # backfill_world_ee_pose.py). NOTE: source: here is documentation only --
-  # dataset/teleop_dataset.py reads this field name as a literal string, not
-  # driven by this config value.
-  source: observations/arm_{side}/O_T_EE_world   # measured, world frame
+  source: observations/arm_{side}/O_T_EE_world
   gripper: observations/arm_{side}/gripper_width
   dims_per_arm: 10
   arms: [arm_left, arm_right]
 
 action:
-  # per arm: commanded EE position (3) + 6D rotation (6) + gripper cmd (1) = 10 -> 20 total
-  # World frame, same rationale as proprio.source above. Also documentation only.
-  source: actions/arm_{side}/O_T_EE_cmd_world    # commanded, world frame, column-major 4x4 flat[16]
+  source: actions/arm_{side}/O_T_EE_cmd_world
   gripper: actions/arm_{side}/gripper_cmd
   dims_per_arm: 10
   arms: [arm_left, arm_right]
-  chunk_size: 60                      # K, ~2s at 30Hz
-
-sampling:
-  # Oversample the final approach to a grasp. Measured over 12 episodes, the
-  # arm is simultaneously centred over an object (<20mm) AND at grasp depth
-  # (-101 +-20mm) in only 1.65% of engaged frames, while a uniform sampler
-  # spends ~98% of its budget on transit and transport. The deployed policy
-  # reproduces each component alone -- it centres to within 3mm and it reaches
-  # -101mm depth -- but not the conjunction, which is exactly the rarest thing
-  # in the data.
-  #
-  # The window is derived from actions/<arm>/gripper_cmd transitions (raw
-  # recorded data, binary 0.0/0.08), NOT from labels/ -- no annotation needed,
-  # and it works on already-collected episodes.
-  #
-  # 1.0 reproduces the original uniform sampler exactly. Measured on ep 014
-  # (natural rate 9.3% of frames in a 1.5s window): 5.0 -> 34%, 10.0 -> 51%,
-  # 20.0 -> 67%. Start around 5 and watch val L1 on the terminal approach
-  # rather than overall -- pushing this too high trades away the transit
-  # behaviour that currently works.
-  grasp_oversample: 1.0
-  grasp_window_s: 1.5
+  chunk_size: 40
 
 normalize:
-  method: zero_mean_unit_var          # per-dim, train-split stats only
-  # New path, not dataset/stats.npz -- that file is baked into
-  # checkpoints/act_sorting_full's saved dataset_config (base frame) and would
-  # silently break that checkpoint's normalization if overwritten in place.
-  stats_file: dataset/stats_world.npz
+  method: zero_mean_unit_var
+  stats_file: dataset/stats.npz

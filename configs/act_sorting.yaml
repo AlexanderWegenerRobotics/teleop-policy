@@ -1,5 +1,3 @@
-# One config = one experiment. This one: vanilla ACT on the sorting task.
-
 dataset_config: configs/dataset.yaml
 
 model:
@@ -14,17 +12,11 @@ model:
 train:
   lr: 1.0e-5
   batch_size: 8
-  # 83 train episodes / batch_size 8 -> 10 batches/epoch (drop_last), so 2000
-  # epochs = ~20000 steps, same order of magnitude that got a clean collapse
-  # in the Stage 2 overfit run (10 episodes = 1 batch/epoch there).
   epochs: 2000
   kl_weight: 10.0
   num_workers: 4
   log_every: 50
-  ckpt_every: 50          # ~500 steps between checkpoints, same cadence as before
-  ckpt_keep_last: 3       # older epoch_*.pt snapshots beyond this are deleted; latest.pt/best.pt always kept
-  ckpt_dir: checkpoints/act_sorting_world  # fresh dir -- world-frame proprio/action, not comparable to act_sorting_full's base-frame run
+  ckpt_every: 100
+  ckpt_keep_last: 3
+  ckpt_dir: checkpoints/act_sorting
   seed: 0
-  # Stage 2 overfit smoke test: set to 10 to train on the first 10 train-split
-  # episodes only. Set to null for Stage 4 full training on the whole split.
-  n_train_episodes: null

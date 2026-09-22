@@ -6,7 +6,6 @@ checkpoints/
 results/
 data/
 .vscode/
-act_policy_debug_handoff.md
 
 # C extensions
 *.so
