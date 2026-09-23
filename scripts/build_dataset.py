@@ -332,7 +332,7 @@ def convert(folder, out_path, rate, size, cameras, camera_params_path=None):
             gw = col_one(hdr, data, "gripper_width")
             if gw is not None:
                 g.create_dataset("gripper_width", data=gw[sel])
-            for field in ("state", "cmd_valid", "log_src", "clutch"):
+            for field in ("state", "cmd_valid", "log_src", "clutch", "authority"):
                 col = col_one(hdr, data, field)
                 if col is not None:
                     g.create_dataset(field, data=col[sel].astype(np.int64))

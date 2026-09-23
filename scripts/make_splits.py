@@ -14,8 +14,8 @@ def main():
     """Write seeded train/val/test episode splits from the episodes in store_root."""
     ap = argparse.ArgumentParser(description="Create train/val/test episode splits.")
     ap.add_argument("config", nargs="?", default="configs/dataset.yaml")
-    ap.add_argument("--val", type=float, default=0.1)
-    ap.add_argument("--test", type=float, default=0.1)
+    ap.add_argument("--val", type=float, default=0.2)
+    ap.add_argument("--test", type=float, default=0.0)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -45,7 +45,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     for name, split in splits.items():
         with open(os.path.join(out_dir, f"{name}.txt"), "w") as f:
-            f.write("\n".join(sorted(split)) + "\n")
+            f.write("".join(f"{eid}\n" for eid in sorted(split)))
         print(f"{name}: {len(split)}")
     for eid, reason in skipped:
         print(f"  [skip] {eid}: {reason}")

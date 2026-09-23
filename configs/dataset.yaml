@@ -28,6 +28,11 @@ action:
   arms: [arm_left, arm_right]
   chunk_size: 40
 
+head:
+  use: true
+  proprio: observations/head/q
+  action: observations/head/q_cmd
+
 normalize:
   method: zero_mean_unit_var
-  stats_file: dataset/stats.npz
+  stats_file: dataset/stats_head.npz

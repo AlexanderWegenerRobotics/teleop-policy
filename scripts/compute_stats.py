@@ -6,8 +6,8 @@ import numpy as np
 import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from dataset.teleop_dataset import engaged_mask
-from dataset.transforms import compute_stats, flat16_to_pos_rot6d
+from dataset.teleop_dataset import action_vector, engaged_mask, proprio_vector
+from dataset.transforms import compute_stats
 
 
 def collect(cfg):
@@ -24,18 +24,9 @@ def collect(cfg):
     for eid in train_ids:
         path = os.path.join(store_root, str(eid).zfill(3), episode_file)
         with h5py.File(path, "r") as f:
-            p_parts, a_parts = [], []
-            for arm in arms:
-                pos, rot6d = flat16_to_pos_rot6d(f[f"observations/{arm}/O_T_EE_world"][:])
-                grip = f[f"observations/{arm}/gripper_width"][:][:, None]
-                p_parts.append(np.concatenate([pos, rot6d, grip], axis=-1))
-
-                cpos, crot6d = flat16_to_pos_rot6d(f[f"actions/{arm}/O_T_EE_cmd_world"][:])
-                cgrip = f[f"actions/{arm}/gripper_cmd"][:][:, None]
-                a_parts.append(np.concatenate([cpos, crot6d, cgrip], axis=-1))
             m = engaged_mask(f, arms, cfg["state"]["train_states"])
-            proprio_all.append(np.concatenate(p_parts, axis=-1)[m])
-            action_all.append(np.concatenate(a_parts, axis=-1)[m])
+            proprio_all.append(proprio_vector(f, cfg, slice(None))[m])
+            action_all.append(action_vector(f, cfg, slice(None))[m])
 
     return np.concatenate(proprio_all, axis=0), np.concatenate(action_all, axis=0)
 

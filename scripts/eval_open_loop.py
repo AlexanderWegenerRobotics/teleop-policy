@@ -7,20 +7,19 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from dataset.teleop_dataset import engaged_mask, read_split
-from dataset.transforms import denormalize, flat16_to_pos_rot6d, normalize
+from dataset.teleop_dataset import action_vector, engaged_mask, proprio_vector, read_split, vector_dim
+from dataset.transforms import denormalize, normalize
 from models.act.act import ACT
 
 M_ENSEMBLE = 0.01
-POSE_KEYS = {"observations": ("O_T_EE_world", "gripper_width"), "actions": ("O_T_EE_cmd_world", "gripper_cmd")}
 
 
 def load_model(ckpt_path, device):
     """Load an ACT checkpoint and its dataset config."""
-    ckpt = torch.load(ckpt_path, map_location=device)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
     dcfg, mcfg = ckpt["dataset_config"], ckpt["model_config"]
     n_cameras = len(dcfg["cameras"]["use"])
-    action_dim = dcfg["action"]["dims_per_arm"] * len(dcfg["action"]["arms"])
+    action_dim = vector_dim(dcfg)
     model = ACT(n_cameras=n_cameras, proprio_dim=action_dim, action_dim=action_dim,
                 chunk_size=dcfg["action"]["chunk_size"], **mcfg).to(device)
     model.load_state_dict(ckpt["model"])
@@ -43,17 +42,6 @@ def load_image(f, cam, t, hw):
     return img.astype(np.float32) / 255.0
 
 
-def pose_at(f, group, arms, t):
-    """Pose and gripper vector for both arms at t, from observations or actions."""
-    pose_key, grip_key = POSE_KEYS[group]
-    parts = []
-    for arm in arms:
-        pos, rot6d = flat16_to_pos_rot6d(f[f"{group}/{arm}/{pose_key}"][t])
-        grip = f[f"{group}/{arm}/{grip_key}"][t]
-        parts.append(np.concatenate([pos, rot6d, [grip]]))
-    return np.concatenate(parts).astype(np.float32)
-
-
 def episode_path(dcfg, episode_id):
     """Path to an episode's hdf5 file."""
     return os.path.join(dcfg["data"]["store_root"], str(episode_id).zfill(3), dcfg["data"]["episode_file"])
@@ -64,19 +52,19 @@ def open_loop_replay(f, model, dcfg, stats, device, stride=1):
     arms = dcfg["action"]["arms"]
     cams, hw = dcfg["cameras"]["use"], dcfg["cameras"]["resize_to"]
     K = dcfg["action"]["chunk_size"]
-    action_dim = dcfg["action"]["dims_per_arm"] * len(arms)
+    action_dim = vector_dim(dcfg)
 
     engaged = engaged_mask(f, arms, dcfg["state"]["train_states"])
     t0, t1 = int(np.where(engaged)[0].min()), int(np.where(engaged)[0].max())
 
-    logged_cmd = np.stack([pose_at(f, "actions", arms, t) for t in range(t0, t1)])
+    logged_cmd = action_vector(f, dcfg, slice(t0, t1))
 
     pending = {t: [] for t in range(t0, t1 + K)}
     with torch.no_grad():
         for t in range(t0, t1, stride):
             images = np.stack([load_image(f, cam, t, hw) for cam in cams])
             images = torch.from_numpy(images).permute(0, 3, 1, 2).unsqueeze(0).float().to(device)
-            proprio = pose_at(f, "observations", arms, t)
+            proprio = proprio_vector(f, dcfg, slice(t, t + 1))[0]
             proprio_n = normalize(proprio, stats["proprio_mean"], stats["proprio_std"])
             proprio_t = torch.from_numpy(proprio_n).unsqueeze(0).float().to(device)
 

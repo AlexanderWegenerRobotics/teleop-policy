@@ -8,15 +8,15 @@ import torch
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from dataset.teleop_dataset import EpisodicDataset, load_cfg, read_split
+from dataset.teleop_dataset import EpisodicDataset, EvalDataset, load_cfg, read_split, vector_dim
 from models.act.act import ACT, act_loss
 
 
-def build_loader(dcfg, split, stats, batch_size, num_workers, shuffle):
-    """DataLoader over one split."""
+def build_loader(dcfg, split, stats, batch_size, num_workers, train, val_stride=10):
+    """Random-timestep loader for training, fixed-timestep loader for validation."""
     ids = read_split(os.path.join(dcfg["data"]["splits"], f"{split}.txt"))
-    ds = EpisodicDataset(ids, dcfg, stats)
-    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, drop_last=shuffle,
+    ds = EpisodicDataset(ids, dcfg, stats) if train else EvalDataset(ids, dcfg, stats, val_stride)
+    return DataLoader(ds, batch_size=batch_size, shuffle=train, num_workers=num_workers, drop_last=train,
                       pin_memory=True, persistent_workers=num_workers > 0)
 
 
@@ -38,16 +38,17 @@ def main():
     npz = np.load(stats_path)
     stats = {k: npz[k] for k in npz.files}
 
-    train_loader = build_loader(dcfg, "train", stats, tcfg["batch_size"], tcfg["num_workers"], shuffle=True)
-    val_loader = build_loader(dcfg, "val", stats, tcfg["batch_size"], tcfg["num_workers"], shuffle=False)
+    train_loader = build_loader(dcfg, "train", stats, tcfg["batch_size"], tcfg["num_workers"], train=True)
+    val_loader = build_loader(dcfg, "val", stats, tcfg["batch_size"], tcfg["num_workers"], train=False,
+                              val_stride=tcfg.get("val_stride", 10))
 
     n_cameras = len(dcfg["cameras"]["use"])
-    action_dim = dcfg["action"]["dims_per_arm"] * len(dcfg["action"]["arms"])
+    action_dim = vector_dim(dcfg)
     model = ACT(n_cameras=n_cameras, proprio_dim=action_dim, action_dim=action_dim,
                 chunk_size=dcfg["action"]["chunk_size"], **mcfg).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"model params: {n_params / 1e6:.1f}M  train episodes: {len(train_loader.dataset)}  "
-          f"device: {device}")
+          f"val samples: {len(val_loader.dataset)}  device: {device}")
 
     opt = torch.optim.AdamW(model.parameters(), lr=tcfg["lr"])
     os.makedirs(tcfg["ckpt_dir"], exist_ok=True)
@@ -154,7 +155,7 @@ def main():
 
 @torch.no_grad()
 def evaluate(model, loader, device):
-    """Mean L1 over a loader."""
+    """Sample-weighted mean L1 over a loader with z = 0, as at deployment."""
     model.eval()
     total, n = 0.0, 0
     for batch in loader:
@@ -162,10 +163,10 @@ def evaluate(model, loader, device):
         proprio = batch["proprio"].to(device)
         action = batch["action"].to(device)
         is_pad = batch["is_pad"].to(device)
-        a_hat, mu, logvar = model(images, proprio, action, is_pad)
-        _, l1, _ = act_loss(a_hat, action, is_pad, mu, logvar, kl_weight=0.0)
-        total += l1.item()
-        n += 1
+        a_hat, _, _ = model(images, proprio)
+        _, l1, _ = act_loss(a_hat, action, is_pad, None, None, kl_weight=0.0)
+        total += l1.item() * len(images)
+        n += len(images)
     return total / max(n, 1)
 
 

@@ -18,5 +18,6 @@ train:
   log_every: 50
   ckpt_every: 100
   ckpt_keep_last: 3
-  ckpt_dir: checkpoints/act_sorting
+  val_stride: 10
+  ckpt_dir: checkpoints/act_sorting_head
   seed: 0

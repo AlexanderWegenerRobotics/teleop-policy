@@ -21,6 +21,68 @@ def read_split(path):
         return [ln.strip() for ln in f if ln.strip()]
 
 
+HEAD_DIMS = 2
+AUTHORITY_HUMAN = 1
+HUMAN_FRAC_MIN = 0.9
+
+
+def chunk_human_fraction(human, K):
+    """Fraction of each K-step action chunk the operator held, edge-padded."""
+    padded = np.concatenate([human, np.repeat(human[-1:], K - 1)]).astype(np.float64)
+    csum = np.concatenate([[0.0], np.cumsum(padded)])
+    return (csum[K:] - csum[:-K]) / K
+
+
+def human_mask(f, arms):
+    """Frames the operator held on every arm, or None if not an intervention episode."""
+    mask = None
+    for arm in arms:
+        g = f[f"observations/{arm}"]
+        if "authority" not in g:
+            return None
+        m = g["authority"][:] == AUTHORITY_HUMAN
+        mask = m if mask is None else mask & m
+    return mask if mask is not None and mask.any() else None
+
+
+def head_cfg(cfg):
+    """Head config if head joints are part of proprio and action, else None."""
+    head = cfg.get("head") or {}
+    return head if head.get("use") else None
+
+
+def vector_dim(cfg):
+    """Proprio and action size: pose and gripper per arm, plus head joints if enabled."""
+    n = cfg["action"]["dims_per_arm"] * len(cfg["action"]["arms"])
+    return n + (HEAD_DIMS if head_cfg(cfg) else 0)
+
+
+def _vector(f, arms, sl, pose_key, grip_key, group, head_key):
+    """Per-arm pose and gripper, plus head joints, over a slice of frames -> [n, D]."""
+    parts = []
+    for arm in arms:
+        pos, rot6d = flat16_to_pos_rot6d(f[f"{group}/{arm}/{pose_key}"][sl])
+        grip = f[f"{group}/{arm}/{grip_key}"][sl][:, None]
+        parts += [pos, rot6d, grip]
+    if head_key:
+        parts.append(f[head_key][sl])
+    return np.concatenate(parts, axis=-1).astype(np.float32)
+
+
+def proprio_vector(f, cfg, sl):
+    """Measured state over a slice of frames -> [n, D]."""
+    head = head_cfg(cfg)
+    return _vector(f, cfg["action"]["arms"], sl, "O_T_EE_world", "gripper_width", "observations",
+                   head["proprio"] if head else None)
+
+
+def action_vector(f, cfg, sl):
+    """Commanded action over a slice of frames -> [n, D]."""
+    head = head_cfg(cfg)
+    return _vector(f, cfg["action"]["arms"], sl, "O_T_EE_cmd_world", "gripper_cmd", "actions",
+                   head["action"] if head else None)
+
+
 def engaged_mask(f, arms, train_states=(4,)):
     """Frames where both arms are engaged with a valid command from the control loop."""
     mask = None
@@ -49,6 +111,7 @@ class EpisodicDataset(Dataset):
         self.K = cfg["action"]["chunk_size"]
         self.train_states = set(cfg["state"]["train_states"])
         self.stats = stats
+        self.cfg = cfg
 
     def __len__(self):
         """Number of episodes."""
@@ -60,8 +123,13 @@ class EpisodicDataset(Dataset):
         return os.path.join(self.store_root, folder, self.episode_file)
 
     def _pick_t(self, f):
-        """Random engaged timestep, else any timestep."""
+        """Random engaged timestep, restricted to human-authored chunks when present."""
         engaged = engaged_mask(f, self.arms, self.train_states)
+        human = human_mask(f, self.arms)
+        if human is not None:
+            filtered = engaged & human & (chunk_human_fraction(human, self.K) >= HUMAN_FRAC_MIN)
+            if filtered.any():
+                engaged = filtered
         valid = np.where(engaged)[0]
         if len(valid) == 0:
             valid = np.arange(len(engaged))
@@ -76,24 +144,14 @@ class EpisodicDataset(Dataset):
         return img.astype(np.float32) / 255.0
 
     def _proprio(self, f, t):
-        """World-frame EE pose and gripper width for both arms at t."""
-        parts = []
-        for arm in self.arms:
-            pos, rot6d = flat16_to_pos_rot6d(f[f"observations/{arm}/O_T_EE_world"][t])
-            grip = f[f"observations/{arm}/gripper_width"][t]
-            parts.append(np.concatenate([pos, rot6d, [grip]]))
-        return np.concatenate(parts).astype(np.float32)
+        """Measured state vector at t."""
+        return proprio_vector(f, self.cfg, slice(t, t + 1))[0]
 
     def _action_chunk(self, f, t):
-        """Commanded action chunk [K, 20] from t, edge-padded, with pad mask."""
+        """Commanded action chunk [K, D] from t, edge-padded, with pad mask."""
         T = f["actions/arm_left/O_T_EE_cmd_world"].shape[0]
         end = min(t + self.K, T)
-        chunk = []
-        for arm in self.arms:
-            pos, rot6d = flat16_to_pos_rot6d(f[f"actions/{arm}/O_T_EE_cmd_world"][t:end])
-            grip = f[f"actions/{arm}/gripper_cmd"][t:end][:, None]
-            chunk.append(np.concatenate([pos, rot6d, grip], axis=-1))
-        chunk = np.concatenate(chunk, axis=-1).astype(np.float32)
+        chunk = action_vector(f, self.cfg, slice(t, end))
 
         is_pad = np.zeros(self.K, dtype=bool)
         if end - t < self.K:
@@ -105,8 +163,13 @@ class EpisodicDataset(Dataset):
     def __getitem__(self, idx):
         """Sample images, proprio and action chunk from one episode."""
         episode_id = self.episode_ids[idx]
+        return self._sample(episode_id, None)
+
+    def _sample(self, episode_id, t):
+        """Images, proprio and action chunk at t, or at a random engaged t if None."""
         with h5py.File(self._episode_path(episode_id), "r") as f:
-            t = self._pick_t(f)
+            if t is None:
+                t = self._pick_t(f)
             images = np.stack([self._load_image(f, cam, t) for cam in self.cams])
             proprio = self._proprio(f, t)
             action, is_pad = self._action_chunk(f, t)
@@ -124,6 +187,27 @@ class EpisodicDataset(Dataset):
             "episode_id": episode_id,
             "t": t,
         }
+
+
+class EvalDataset(EpisodicDataset):
+    """Fixed engaged timesteps every stride frames over all episodes, for a stable val loss."""
+
+    def __init__(self, episode_ids, cfg, stats=None, stride=10):
+        """Enumerate (episode, t) pairs once."""
+        super().__init__(episode_ids, cfg, stats)
+        self.index = []
+        for eid in episode_ids:
+            with h5py.File(self._episode_path(eid), "r") as f:
+                ts = np.where(engaged_mask(f, self.arms, self.train_states))[0][::stride]
+            self.index += [(eid, int(t)) for t in ts]
+
+    def __len__(self):
+        """Number of (episode, t) pairs."""
+        return len(self.index)
+
+    def __getitem__(self, idx):
+        """Sample at a fixed (episode, t)."""
+        return self._sample(*self.index[idx])
 
 
 def build_datasets(cfg_path):
